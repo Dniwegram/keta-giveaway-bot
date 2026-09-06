@@ -32,7 +32,7 @@ from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatMemberStatus, ParseMode
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -190,7 +190,7 @@ def subscribe_keyboard() -> InlineKeyboardMarkup:
 async def is_subscribed(user_id: int) -> bool:
     try:
         member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
-    except TelegramBadRequest as e:
+    except (TelegramBadRequest, TelegramForbiddenError) as e:
         logger.warning("Не удалось проверить подписку user_id=%s: %s", user_id, e)
         return False
     return member.status in OK_STATUSES
@@ -302,7 +302,7 @@ async def handle_photo(message: Message, state: FSMContext) -> None:
 
     try:
         await bot.send_photo(chat_id=ADMIN_CHAT_ID, photo=photo_file_id, caption=caption)
-    except TelegramBadRequest as e:
+    except (TelegramBadRequest, TelegramForbiddenError) as e:
         logger.error("Не удалось отправить заявку в админ-чат: %s", e)
 
 
@@ -379,7 +379,7 @@ async def cmd_delete(message: Message, command: CommandObject) -> None:
             "Ваша заявка на розыгрыш была отклонена модератором (не подошёл присланный скриншот). "
             "Вы можете отправить новую заявку — напишите /start и пройдите шаги заново.",
         )
-    except TelegramBadRequest as e:
+    except (TelegramBadRequest, TelegramForbiddenError) as e:
         logger.warning("Не удалось уведомить пользователя %s об удалении заявки: %s", entry["user_id"], e)
 
 
