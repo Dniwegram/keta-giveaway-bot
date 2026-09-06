@@ -159,7 +159,7 @@ async def all_entries():
 
 def join_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="🎉 Участвовать", callback_data="join")]]
+        inline_keyboard=[[InlineKeyboardButton(text="🎉 Участвую", callback_data="join")]]
     )
 
 
@@ -193,9 +193,15 @@ def is_admin(user_id: int) -> bool:
 async def cmd_start(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
-        "Привет! 🎁 Здесь проходит розыгрыш.\n\n"
-        "Чтобы участвовать, нужно быть подписанным на канал и прислать своё фото-заявку.\n\n"
-        "Нажми кнопку ниже, чтобы начать.",
+        "🎉 Привет! Здесь проходит розыгрыш iPhone!\n\n"
+        "<b>Чтобы участвовать, нужно:</b>\n"
+        f'• быть подписанным на канал <a href="{CHANNEL_URL}">@ketamedia</a>\n'
+        "• снять видео до 8 мин. о поездке по Хабаровскому краю и отправить его на сайт "
+        "путешественникдв.рф\n"
+        "• отправить в бота скриншот отправленной заявки — так мы сможем отследить, что ты её присылал\n"
+        "• нажать на кнопку «Участвую»\n\n"
+        "Победителя определим на фестивале «Амур. Живая линия», который пройдёт на площади "
+        "им. Ленина 12 и 13 сентября.",
         reply_markup=join_keyboard(),
     )
 
@@ -212,7 +218,8 @@ async def _handle_join_flow(user_id: int, message_to_edit: Message, state: FSMCo
         await state.set_state(Entry.waiting_photo)
         await message_to_edit.answer(
             "Отлично, подписка подтверждена ✅\n\n"
-            "Теперь пришлите одно фото — это будет ваша заявка на участие."
+            "Теперь пришлите скриншот отправленной заявки на сайте путешественникдв.рф — "
+            "это подтвердит ваше участие в розыгрыше."
         )
     else:
         await message_to_edit.answer(
@@ -264,7 +271,8 @@ async def handle_photo(message: Message, state: FSMContext) -> None:
     await state.clear()
 
     await message.answer(
-        f"Заявка принята! 🎉 Ваш номер: <b>#{entry_id}</b>\nРезультаты розыгрыша будут объявлены в канале."
+        f"Заявка принята! 🎉 Ваш номер: <b>#{entry_id}</b>\n"
+        "Победителя определим на фестивале «Амур. Живая линия» (12–13 сентября, площадь им. Ленина)."
     )
 
     username_line = f"Username: @{user.username}" if user.username else "Username: —"
@@ -284,7 +292,9 @@ async def handle_photo(message: Message, state: FSMContext) -> None:
 
 @dp.message(Entry.waiting_photo)
 async def handle_wrong_content(message: Message) -> None:
-    await message.answer("Нужно прислать именно фото (не файл и не текст) — попробуйте ещё раз.")
+    await message.answer(
+        "Нужно прислать именно скриншот заявки как фото (не файлом и не текстом) — попробуйте ещё раз."
+    )
 
 
 # --------------------------------------------------------------------------- #
