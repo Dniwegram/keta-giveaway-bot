@@ -10,6 +10,8 @@ Telegram-бот для розыгрыша с проверкой подписки
    и пересылается в приватный админ-чат/канал живой лентой.
 4. Админ-команды (доступны только ADMIN_IDS):
    /stats        - сколько всего заявок
+   /list         - список всех заявок текстом
+   /delete <id>  - удалить заявку по номеру
    /export       - выгрузить все заявки в CSV
    /pick_winner  - случайно выбрать победителя из заявок
 
@@ -31,7 +33,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatMemberStatus, ParseMode
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -125,6 +127,20 @@ async def get_entry(user_id: int):
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM entries WHERE user_id = ?", (user_id,)) as cur:
             return await cur.fetchone()
+
+
+async def get_entry_by_id(entry_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)) as cur:
+            return await cur.fetchone()
+
+
+async def delete_entry(entry_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
+        await db.commit()
+        return cursor.rowcount > 0
 
 
 async def add_entry(user_id: int, username: str, full_name: str, photo_file_id: str) -> int:
@@ -308,6 +324,63 @@ async def cmd_stats(message: Message) -> None:
         return
     total = await count_entries()
     await message.answer(f"Всего заявок: <b>{total}</b>")
+
+
+@dp.message(Command("list"))
+async def cmd_list(message: Message) -> None:
+    if not is_admin(message.from_user.id):
+        return
+    rows = await all_entries()
+    if not rows:
+        await message.answer("Пока нет ни одной заявки.")
+        return
+
+    lines = []
+    for r in rows:
+        username_part = f"@{r['username']}" if r["username"] else "—"
+        lines.append(
+            f"#{r['id']} — {r['full_name']} ({username_part}) id:{r['user_id']} — {r['created_at']} UTC"
+        )
+
+    # Telegram режет сообщения по ~4096 символов — на всякий случай бьём список на части.
+    chunk = ""
+    for line in lines:
+        if len(chunk) + len(line) + 1 > 3500:
+            await message.answer(chunk)
+            chunk = ""
+        chunk += line + "\n"
+    if chunk:
+        await message.answer(chunk)
+
+    await message.answer("Чтобы удалить заявку: /delete <номер>, например /delete 12")
+
+
+@dp.message(Command("delete"))
+async def cmd_delete(message: Message, command: CommandObject) -> None:
+    if not is_admin(message.from_user.id):
+        return
+
+    if not command.args or not command.args.strip().isdigit():
+        await message.answer("Использование: /delete <номер_заявки>\nНапример: /delete 12")
+        return
+
+    entry_id = int(command.args.strip())
+    entry = await get_entry_by_id(entry_id)
+    if not entry:
+        await message.answer(f"Заявка #{entry_id} не найдена.")
+        return
+
+    await delete_entry(entry_id)
+    await message.answer(f"Заявка #{entry_id} ({entry['full_name']}) удалена.")
+
+    try:
+        await bot.send_message(
+            entry["user_id"],
+            "Ваша заявка на розыгрыш была отклонена модератором (не подошёл присланный скриншот). "
+            "Вы можете отправить новую заявку — напишите /start и пройдите шаги заново.",
+        )
+    except TelegramBadRequest as e:
+        logger.warning("Не удалось уведомить пользователя %s об удалении заявки: %s", entry["user_id"], e)
 
 
 @dp.message(Command("export"))
