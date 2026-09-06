@@ -6,8 +6,8 @@ Telegram-бот для розыгрыша с проверкой подписки
 2. Бот проверяет подписку на канал (get_chat_member).
    - Не подписан -> кнопки "Подписаться" + "Я подписался, проверить".
    - Подписан -> просит прислать фото.
-3. Пользователь присылает фото -> заявка сохраняется в БД (одна заявка на пользователя)
-   и пересылается в приватный админ-чат/канал живой лентой.
+3. Пользователь присылает фото -> бот просит номер телефона -> заявка сохраняется в БД
+   (одна заявка на пользователя) и пересылается в приватный админ-чат/канал живой лентой.
 4. Админ-команды (доступны только ADMIN_IDS):
    /stats        - сколько всего заявок
    /list         - список всех заявок текстом
@@ -24,6 +24,8 @@ import io
 import logging
 import os
 import random
+import re
+import sqlite3
 from datetime import datetime
 
 import aiosqlite
@@ -98,6 +100,7 @@ dp = Dispatcher(storage=MemoryStorage())
 
 class Entry(StatesGroup):
     waiting_photo = State()
+    waiting_phone = State()
 
 
 # --------------------------------------------------------------------------- #
@@ -111,6 +114,7 @@ CREATE TABLE IF NOT EXISTS entries (
     username TEXT,
     full_name TEXT,
     photo_file_id TEXT NOT NULL,
+    phone TEXT,
     created_at TEXT NOT NULL
 );
 """
@@ -119,6 +123,11 @@ CREATE TABLE IF NOT EXISTS entries (
 async def init_db() -> None:
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(CREATE_TABLE_SQL)
+        # Миграция для баз, созданных до появления номера телефона.
+        try:
+            await db.execute("ALTER TABLE entries ADD COLUMN phone TEXT")
+        except sqlite3.OperationalError:
+            pass  # столбец уже есть
         await db.commit()
 
 
@@ -143,12 +152,19 @@ async def delete_entry(entry_id: int) -> bool:
         return cursor.rowcount > 0
 
 
-async def add_entry(user_id: int, username: str, full_name: str, photo_file_id: str) -> int:
+async def add_entry(user_id: int, username: str, full_name: str, photo_file_id: str, phone: str) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
-            "INSERT INTO entries (user_id, username, full_name, photo_file_id, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (user_id, username, full_name, photo_file_id, datetime.utcnow().isoformat(timespec="seconds")),
+            "INSERT INTO entries (user_id, username, full_name, photo_file_id, phone, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                user_id,
+                username,
+                full_name,
+                photo_file_id,
+                phone,
+                datetime.utcnow().isoformat(timespec="seconds"),
+            ),
         )
         await db.commit()
         return cursor.lastrowid
@@ -215,6 +231,7 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
         "• снять видео до 8 мин. о поездке по Хабаровскому краю и отправить его на сайт "
         "путешественникдв.рф\n"
         "• отправить в бота скриншот отправленной заявки — так мы сможем отследить, что ты её присылал\n"
+        "• оставить номер телефона для связи, если выиграешь\n"
         "• нажать на кнопку «Участвую»\n\n"
         "Победителя определим на фестивале «Амур. Живая линия», который пройдёт на площади "
         "им. Ленина 12 и 13 сентября.",
@@ -263,7 +280,7 @@ async def cb_recheck(callback: CallbackQuery, state: FSMContext) -> None:
 async def handle_photo(message: Message, state: FSMContext) -> None:
     user = message.from_user
 
-    # На всякий случай перепроверяем подписку прямо перед сохранением заявки.
+    # На всякий случай перепроверяем подписку прямо перед тем, как двигаться дальше.
     if not await is_subscribed(user.id):
         await state.clear()
         await message.answer(
@@ -278,11 +295,64 @@ async def handle_photo(message: Message, state: FSMContext) -> None:
         return
 
     photo_file_id = message.photo[-1].file_id  # самое большое разрешение
+    await state.update_data(photo_file_id=photo_file_id)
+    await state.set_state(Entry.waiting_phone)
+    await message.answer(
+        "Отлично, скриншот получен ✅\n\n"
+        "Теперь пришлите номер телефона для связи (если выиграете), например: <code>+79141234567</code>"
+    )
+
+
+@dp.message(Entry.waiting_photo)
+async def handle_wrong_content(message: Message) -> None:
+    await message.answer(
+        "Нужно прислать именно скриншот заявки как фото (не файлом и не текстом) — попробуйте ещё раз."
+    )
+
+
+PHONE_DIGITS_RE = re.compile(r"\D")
+
+
+@dp.message(Entry.waiting_phone, F.text)
+async def handle_phone(message: Message, state: FSMContext) -> None:
+    user = message.from_user
+    phone_raw = message.text.strip()
+    digits_only = PHONE_DIGITS_RE.sub("", phone_raw)
+
+    if not (10 <= len(digits_only) <= 12):
+        await message.answer(
+            "Похоже, это не номер телефона. Пришлите номер в формате, например: <code>+79141234567</code>"
+        )
+        return
+
+    data = await state.get_data()
+    photo_file_id = data.get("photo_file_id")
+    if not photo_file_id:
+        # Данные потерялись (например, бот перезапускался между шагами) — просим начать заново.
+        await state.clear()
+        await message.answer("Что-то пошло не так, начните заново: /start")
+        return
+
+    # Ещё раз перепроверяем подписку и отсутствие дубля перед финальным сохранением.
+    if not await is_subscribed(user.id):
+        await state.clear()
+        await message.answer(
+            "Подписка на канал не найдена — заявка не принята. Подпишитесь и начните заново: /start",
+            reply_markup=subscribe_keyboard(),
+        )
+        return
+
+    if await get_entry(user.id):
+        await state.clear()
+        await message.answer("Заявка от вас уже есть, повторно участвовать нельзя 🙂")
+        return
+
     entry_id = await add_entry(
         user_id=user.id,
         username=user.username or "",
         full_name=user.full_name,
         photo_file_id=photo_file_id,
+        phone=phone_raw,
     )
     await state.clear()
 
@@ -296,6 +366,7 @@ async def handle_photo(message: Message, state: FSMContext) -> None:
         f"📝 Новая заявка <b>#{entry_id}</b>\n"
         f"Имя: {user.full_name}\n"
         f"{username_line}\n"
+        f"Телефон: <code>{phone_raw}</code>\n"
         f"ID: <code>{user.id}</code>\n"
         f"Время: {datetime.utcnow().isoformat(timespec='seconds')} UTC"
     )
@@ -306,11 +377,9 @@ async def handle_photo(message: Message, state: FSMContext) -> None:
         logger.error("Не удалось отправить заявку в админ-чат: %s", e)
 
 
-@dp.message(Entry.waiting_photo)
-async def handle_wrong_content(message: Message) -> None:
-    await message.answer(
-        "Нужно прислать именно скриншот заявки как фото (не файлом и не текстом) — попробуйте ещё раз."
-    )
+@dp.message(Entry.waiting_phone)
+async def handle_phone_wrong_content(message: Message) -> None:
+    await message.answer("Пришлите номер телефона текстом, например: <code>+79141234567</code>")
 
 
 # --------------------------------------------------------------------------- #
@@ -338,8 +407,10 @@ async def cmd_list(message: Message) -> None:
     lines = []
     for r in rows:
         username_part = f"@{r['username']}" if r["username"] else "—"
+        phone_part = r["phone"] or "—"
         lines.append(
-            f"#{r['id']} — {r['full_name']} ({username_part}) id:{r['user_id']} — {r['created_at']} UTC"
+            f"#{r['id']} — {r['full_name']} ({username_part}) id:{r['user_id']} "
+            f"тел: {phone_part} — {r['created_at']} UTC"
         )
 
     # Telegram режет сообщения по ~4096 символов — на всякий случай бьём список на части.
@@ -394,9 +465,11 @@ async def cmd_export(message: Message) -> None:
 
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["id", "user_id", "username", "full_name", "photo_file_id", "created_at_utc"])
+    writer.writerow(["id", "user_id", "username", "full_name", "phone", "photo_file_id", "created_at_utc"])
     for r in rows:
-        writer.writerow([r["id"], r["user_id"], r["username"], r["full_name"], r["photo_file_id"], r["created_at"]])
+        writer.writerow(
+            [r["id"], r["user_id"], r["username"], r["full_name"], r["phone"], r["photo_file_id"], r["created_at"]]
+        )
 
     data = buf.getvalue().encode("utf-8-sig")  # BOM, чтобы Excel не ломал кириллицу
     filename = f"entries_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
@@ -418,6 +491,7 @@ async def cmd_pick_winner(message: Message) -> None:
         f"🏆 Победитель: заявка <b>#{winner['id']}</b>\n"
         f"Имя: {winner['full_name']}\n"
         f"{username_line}\n"
+        f"Телефон: <code>{winner['phone'] or '—'}</code>\n"
         f"ID: <code>{winner['user_id']}</code>"
     )
     await message.answer_photo(photo=winner["photo_file_id"], caption=caption)
